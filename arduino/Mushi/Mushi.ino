@@ -11,10 +11,12 @@ const char* AP_PASS = "servo1234";
 
 #define RIGHT_SERVO 0
 #define LEFT_SERVO  1
+#define PAN_SERVO   2
 #define SERVO_MIN   65
 #define SERVO_MAX   105
 #define SERVO_MID   90
 #define MAX_DEG     20
+#define PAN_MAX_DEG 40
 
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
@@ -35,18 +37,25 @@ void setFromJoystick(float joyX, float joyY) {
   pwm.setPWM(LEFT_SERVO,  0, angleToPwm(left_angle));
 }
 
+void setPan(float pan) {
+  int pan_angle = constrain((int)(SERVO_MID + pan * PAN_MAX_DEG), 50, 130);
+  pwm.setPWM(PAN_SERVO, 0, angleToPwm(pan_angle));
+}
+
 void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                AwsEventType type, void* arg, uint8_t* data, size_t len) {
   if (type == WS_EVT_DATA) {
     AwsFrameInfo* info = (AwsFrameInfo*)arg;
     if (info->opcode == WS_TEXT) {
       data[len] = '\0';
-      // Message format: "x,y"  e.g. "0.45,-0.30"
-      float x = 0, y = 0;
-      sscanf((char*)data, "%f,%f", &x, &y);
-      x = constrain(x, -1.0f, 1.0f);
-      y = constrain(y, -1.0f, 1.0f);
+      // Message format: "x,y,pan"  e.g. "0.45,-0.30,0.10"
+      float x = 0, y = 0, pan = 0;
+      sscanf((char*)data, "%f,%f,%f", &x, &y, &pan);
+      x   = constrain(x,   -1.0f, 1.0f);
+      y   = constrain(y,   -1.0f, 1.0f);
+      pan = constrain(pan, -1.0f, 1.0f);
       setFromJoystick(x, y);
+      setPan(pan);
     }
   }
 }
@@ -69,7 +78,6 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       justify-content: center;
       height: 100vh;
       user-select: none;
-      touch-action: none;
     }
     h2 { margin-bottom: 36px; font-size: 1.4rem; letter-spacing: 1px; }
     #zone {
@@ -99,6 +107,38 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       left: 50%; top: 50%;
       pointer-events: none;
     }
+    #pan-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin-top: 24px;
+      width: 280px;
+      gap: 6px;
+    }
+    #pan-label {
+      font-size: 0.85rem;
+      color: #aaa;
+      letter-spacing: 1px;
+    }
+    #pan-slider {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 6px;
+      border-radius: 3px;
+      background: #16213e;
+      border: 2px solid #e94560;
+      outline: none;
+      touch-action: pan-x;
+    }
+    #pan-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, #ff6b81, #e94560);
+      box-shadow: 0 0 10px #e9456066;
+      cursor: pointer;
+    }
     #status {
       margin-top: 16px;
       font-size: 0.8rem;
@@ -118,18 +158,25 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <body>
   <h2>Tilt Control</h2>
   <div id="zone"><div id="knob"></div></div>
+  <div id="pan-wrap">
+    <span id="pan-label">PAN</span>
+    <input type="range" id="pan-slider" min="-100" max="100" value="0">
+  </div>
   <div id="status">Connecting...</div>
   <div id="info">
     <div id="vals">X: 0.00 &nbsp; Y: 0.00</div>
     <span id="angles">Right: 90° &nbsp; Left: 90°</span>
+    <div id="pan-val">Pan: 90°</div>
   </div>
 
   <script>
-    const zone   = document.getElementById('zone');
-    const knob   = document.getElementById('knob');
-    const vals   = document.getElementById('vals');
-    const angles = document.getElementById('angles');
-    const status = document.getElementById('status');
+    const zone      = document.getElementById('zone');
+    const knob      = document.getElementById('knob');
+    const vals      = document.getElementById('vals');
+    const angles    = document.getElementById('angles');
+    const status    = document.getElementById('status');
+    const panSlider = document.getElementById('pan-slider');
+    const panVal    = document.getElementById('pan-val');
 
     const R     = zone.offsetWidth / 2;
     const KR    = 35;
@@ -148,6 +195,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     let active = false;
     let cx = 0, cy = 0;
     let lastX = 0, lastY = 0;
+    let lastPan = 0;
     let rafId = null;
 
     function getCenter() {
@@ -156,11 +204,15 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       cy = rect.top  + rect.height / 2;
     }
 
+    function sendState() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(lastX.toFixed(3) + ',' + lastY.toFixed(3) + ',' + lastPan.toFixed(3));
+      }
+    }
+
     function sendLoop() {
       if (!active) return;
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(lastX.toFixed(3) + ',' + lastY.toFixed(3));
-      }
+      sendState();
       rafId = requestAnimationFrame(sendLoop);
     }
 
@@ -189,7 +241,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       knob.style.transition = 'left 0.2s, top 0.2s';
       knob.style.left = '50%';
       knob.style.top  = '50%';
-      if (ws && ws.readyState === WebSocket.OPEN) ws.send('0,0');
+      lastX = 0; lastY = 0;
+      sendState();
       vals.innerHTML = 'X: 0.00 &nbsp; Y: 0.00';
       angles.textContent = 'Right: 90°   Left: 90°';
     }
@@ -210,10 +263,20 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       rafId = requestAnimationFrame(sendLoop);
     }, { passive: false });
     window.addEventListener('touchmove', e => {
-      e.preventDefault();
-      if (active) update(e.touches[0].clientX, e.touches[0].clientY);
+      if (active) {
+        e.preventDefault();
+        update(e.touches[0].clientX, e.touches[0].clientY);
+      }
     }, { passive: false });
     window.addEventListener('touchend', release);
+
+    // Pan slider
+    panSlider.addEventListener('input', () => {
+      lastPan = panSlider.value / 100;
+      const panAngle = Math.round(90 + lastPan * 40);
+      panVal.textContent = `Pan: ${panAngle}°`;
+      sendState();
+    });
   </script>
 </body>
 </html>
@@ -228,6 +291,7 @@ void setup() {
 
   pwm.setPWM(RIGHT_SERVO, 0, angleToPwm(SERVO_MID));
   pwm.setPWM(LEFT_SERVO,  0, angleToPwm(SERVO_MID));
+  pwm.setPWM(PAN_SERVO,   0, angleToPwm(SERVO_MID));
   Serial.println("Servos at 90.");
 
   WiFi.softAP(AP_SSID, AP_PASS);
